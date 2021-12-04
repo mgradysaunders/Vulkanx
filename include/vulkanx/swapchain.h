@@ -315,17 +315,6 @@ VkResult vkxSwapchainSetupRenderPass(
     const VkRenderPassCreateInfo* pCreateInfo,
     const VkAllocationCallbacks* pAllocator);
 
-#if 0
-/**
- * \brief Get render pass begin info.
- */
-void vkxSwapchainGetRenderPassBeginInfo(
-            const VkxSwapchain* pSwapchain,
-            uint32_t clearValueCount,
-            const VkClearValue* pClearValues,
-            VkRenderPassBeginInfo* pBeginInfo);
-#endif
-
 /**
  * \brief Acquire next image.
  *
