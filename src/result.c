@@ -1,0 +1,32 @@
+#include <vulkanx/result.h>
+
+const char* vkxResultName(VkResult result) {
+    const char* str = "VK_(unknown)";
+    switch (result) {
+#define RESULT_CASE(res)                                                      \
+    case res: str = #res; break;
+        RESULT_CASE(VK_SUCCESS);
+        RESULT_CASE(VK_NOT_READY);
+        RESULT_CASE(VK_TIMEOUT);
+        RESULT_CASE(VK_EVENT_SET);
+        RESULT_CASE(VK_EVENT_RESET);
+        RESULT_CASE(VK_INCOMPLETE);
+        RESULT_CASE(VK_ERROR_OUT_OF_HOST_MEMORY);
+        RESULT_CASE(VK_ERROR_OUT_OF_DEVICE_MEMORY);
+        RESULT_CASE(VK_ERROR_INITIALIZATION_FAILED);
+        RESULT_CASE(VK_ERROR_DEVICE_LOST);
+        RESULT_CASE(VK_ERROR_MEMORY_MAP_FAILED);
+        RESULT_CASE(VK_ERROR_LAYER_NOT_PRESENT);
+        RESULT_CASE(VK_ERROR_EXTENSION_NOT_PRESENT);
+        RESULT_CASE(VK_ERROR_FEATURE_NOT_PRESENT);
+        RESULT_CASE(VK_ERROR_INCOMPATIBLE_DRIVER);
+        RESULT_CASE(VK_ERROR_TOO_MANY_OBJECTS);
+        RESULT_CASE(VK_ERROR_FORMAT_NOT_SUPPORTED);
+        RESULT_CASE(VK_ERROR_FRAGMENTED_POOL);
+        RESULT_CASE(VK_ERROR_OUT_OF_POOL_MEMORY);
+        RESULT_CASE(VK_ERROR_INVALID_EXTERNAL_HANDLE);
+#undef RESULT_CASE
+    default: break;
+    }
+    return str;
+}

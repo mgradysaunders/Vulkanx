@@ -1,0 +1,824 @@
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include <vulkanx/command_buffer.h>
+#include <vulkanx/result.h>
+#include <vulkanx/memory.h>
+#include <vulkanx/swapchain.h>
+
+// Select present mode.
+static VkResult selectSwapchainPresentMode(
+    VkPhysicalDevice physicalDevice,
+    VkSurfaceKHR surface,
+    VkPresentModeKHR* pPresentMode) {
+    // Allocate present modes.
+    uint32_t presentModeCount = 0;
+    VkPresentModeKHR* pPresentModes = NULL;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(
+        physicalDevice, surface, &presentModeCount, NULL);
+    if (presentModeCount == 0) {
+        return VK_ERROR_INCOMPATIBLE_DRIVER;
+    }
+    pPresentModes =
+        VKX_LOCAL_MALLOC(sizeof(VkPresentModeKHR) * presentModeCount);
+    {
+        // Retrieve present modes.
+        VkResult result = vkGetPhysicalDeviceSurfacePresentModesKHR(
+            physicalDevice, surface, &presentModeCount, pPresentModes);
+        if (VKX_IS_ERROR(result)) {
+            // Free present modes.
+            VKX_LOCAL_FREE(pPresentModes);
+            return result;
+        }
+    }
+
+    // Best present mode.
+    VkPresentModeKHR bestPresentMode = 0;
+
+    // Prefer mailbox.
+    VkBool32 found = VK_FALSE;
+    for (uint32_t presentModeIndex = 0; presentModeIndex < presentModeCount;
+         presentModeIndex++) {
+        if (pPresentModes[presentModeIndex] == VK_PRESENT_MODE_MAILBOX_KHR) {
+            bestPresentMode = pPresentModes[presentModeIndex];
+            found = VK_TRUE;
+            break;
+        }
+    }
+    // Prefer fifo (should always be available).
+    if (found == VK_FALSE) {
+        for (uint32_t presentModeIndex = 0;
+             presentModeIndex < presentModeCount; presentModeIndex++) {
+            if (pPresentModes[presentModeIndex] ==
+                VK_PRESENT_MODE_IMMEDIATE_KHR) {
+                bestPresentMode = pPresentModes[presentModeIndex];
+                found = VK_TRUE;
+                break;
+            }
+        }
+    }
+    // Default.
+    if (found == VK_FALSE) {
+        bestPresentMode = pPresentModes[0];
+    }
+
+    // Free present modes.
+    VKX_LOCAL_FREE(pPresentModes);
+
+    // Done.
+    *pPresentMode = bestPresentMode;
+    return VK_SUCCESS;
+}
+
+// Select surface format.
+static VkResult selectSwapchainSurfaceFormat(
+    VkPhysicalDevice physicalDevice,
+    VkSurfaceKHR surface,
+    VkSurfaceFormatKHR* pSurfaceFormat) {
+    // Allocate surface formats.
+    uint32_t surfaceFormatCount = 0;
+    VkSurfaceFormatKHR* pSurfaceFormats = NULL;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(
+        physicalDevice, surface, &surfaceFormatCount, NULL);
+    pSurfaceFormats =
+        VKX_LOCAL_MALLOC(sizeof(VkSurfaceFormatKHR) * surfaceFormatCount);
+    {
+        // Retrieve surface formats.
+        VkResult result = vkGetPhysicalDeviceSurfaceFormatsKHR(
+            physicalDevice, surface, &surfaceFormatCount, pSurfaceFormats);
+        if (VKX_IS_ERROR(result)) {
+            // Free surface formats.
+            VKX_LOCAL_FREE(pSurfaceFormats);
+            return result;
+        }
+    }
+
+    // Best surface format.
+    VkSurfaceFormatKHR bestSurfaceFormat = {
+        .format = VK_FORMAT_UNDEFINED, .colorSpace = (VkColorSpaceKHR)0};
+
+    // Prefer B8G8R8A8_UNORM and SRGB_NONLINEAR.
+    for (uint32_t surfaceFormatIndex = 0;
+         surfaceFormatIndex < surfaceFormatCount; surfaceFormatIndex++) {
+        VkSurfaceFormatKHR thisSurfaceFormat =
+            pSurfaceFormats[surfaceFormatIndex];
+        if ((thisSurfaceFormat.format == VK_FORMAT_UNDEFINED) ||
+            (thisSurfaceFormat.format == VK_FORMAT_B8G8R8A8_UNORM &&
+             thisSurfaceFormat.colorSpace ==
+                 VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)) {
+            bestSurfaceFormat.format = VK_FORMAT_B8G8R8A8_UNORM;
+            bestSurfaceFormat.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+            break;
+        }
+    }
+
+    // Prefer B8G8R8A8_UNORM.
+    if (bestSurfaceFormat.format == VK_FORMAT_UNDEFINED) {
+        for (uint32_t surfaceFormatIndex = 0;
+             surfaceFormatIndex < surfaceFormatCount; surfaceFormatIndex++) {
+            VkSurfaceFormatKHR thisSurfaceFormat =
+                pSurfaceFormats[surfaceFormatIndex];
+            if (thisSurfaceFormat.format == VK_FORMAT_B8G8R8A8_UNORM) {
+                bestSurfaceFormat = thisSurfaceFormat;
+                break;
+            }
+        }
+    }
+
+    // Default.
+    if (surfaceFormatCount != 0 &&
+        bestSurfaceFormat.format == VK_FORMAT_UNDEFINED) {
+        bestSurfaceFormat = pSurfaceFormats[0];
+    }
+
+    // Free surface formats.
+    VKX_LOCAL_FREE(pSurfaceFormats);
+
+    if (bestSurfaceFormat.format == VK_FORMAT_UNDEFINED) {
+        return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    }
+    else {
+        // Done.
+        *pSurfaceFormat = bestSurfaceFormat;
+        return VK_SUCCESS;
+    }
+}
+
+// Create swapchain.
+VkResult vkxCreateSwapchain(
+    VkPhysicalDevice physicalDevice,
+    VkDevice device,
+    uint32_t graphicsQueueFamilyIndex,
+    uint32_t presentQueueFamilyIndex,
+    VkSurfaceKHR surface,
+    VkExtent2D surfaceExtent,
+    const VkAllocationCallbacks* pAllocator,
+    VkxSwapchain* pSwapchain) {
+    assert(pSwapchain);
+    memset(pSwapchain, 0, sizeof(VkxSwapchain));
+    pSwapchain->physicalDevice = physicalDevice;
+    pSwapchain->device = device;
+
+    {
+        // Select present mode.
+        VkResult result = selectSwapchainPresentMode(
+            physicalDevice, surface, &pSwapchain->presentMode);
+        if (VKX_IS_ERROR(result)) {
+            return result;
+        }
+    }
+
+    {
+        // Select surface format.
+        VkResult result = selectSwapchainSurfaceFormat(
+            physicalDevice, surface, &pSwapchain->surfaceFormat);
+        if (VKX_IS_ERROR(result)) {
+            return result;
+        }
+    }
+
+    VkSurfaceCapabilitiesKHR surfaceCapabilities;
+    {
+        // Get surface capabilities.
+        VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+            physicalDevice, surface, &surfaceCapabilities);
+        if (VKX_IS_ERROR(result)) {
+            return result;
+        }
+    }
+
+    // Select pre-transform.
+    pSwapchain->preTransform = surfaceCapabilities.supportedTransforms &
+                                       VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+                                   ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+                                   : surfaceCapabilities.currentTransform;
+
+    // Select composite alpha.
+    pSwapchain->compositeAlpha =
+        surfaceCapabilities.supportedCompositeAlpha &
+                VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR
+            ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR
+        : surfaceCapabilities.supportedCompositeAlpha &
+                VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR
+            ? VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR
+        : surfaceCapabilities.supportedCompositeAlpha &
+                VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR
+            ? VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR
+            : VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+
+    // Select swapchain image usage.
+    pSwapchain->imageUsage =
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+        (surfaceCapabilities.supportedUsageFlags &
+         (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT));
+
+    // Queue families unique?
+    if (graphicsQueueFamilyIndex != presentQueueFamilyIndex) {
+        // Set queue family indices.
+        pSwapchain->queueFamilyIndexCount = 2;
+        pSwapchain->queueFamilyIndices[0] = graphicsQueueFamilyIndex;
+        pSwapchain->queueFamilyIndices[1] = presentQueueFamilyIndex;
+        // Set image sharing mode.
+        pSwapchain->imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+    }
+    else {
+        // Set queue family indices.
+        pSwapchain->queueFamilyIndexCount = 1;
+        pSwapchain->queueFamilyIndices[0] = graphicsQueueFamilyIndex;
+        pSwapchain->queueFamilyIndices[1] = UINT32_MAX;
+        // Set image sharing mode.
+        pSwapchain->imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    }
+
+    // Get queues.
+    vkGetDeviceQueue(
+        device, graphicsQueueFamilyIndex, 0, &pSwapchain->graphicsQueue);
+    vkGetDeviceQueue(
+        device, presentQueueFamilyIndex, 0, &pSwapchain->presentQueue);
+
+    // Create command pool.
+    VkCommandPoolCreateInfo commandPoolCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = NULL,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = graphicsQueueFamilyIndex};
+    VkResult result = vkCreateCommandPool(
+        device, &commandPoolCreateInfo, pAllocator, &pSwapchain->commandPool);
+    if (result != VK_SUCCESS) {
+        return result;
+    }
+
+    // Delegate.
+    return vkxRecreateSwapchain(
+        surface, surfaceExtent, pAllocator, pSwapchain);
+}
+
+// Recreate swapchain.
+VkResult vkxRecreateSwapchain(
+    VkSurfaceKHR surface,
+    VkExtent2D surfaceExtent,
+    const VkAllocationCallbacks* pAllocator,
+    VkxSwapchain* pSwapchain) {
+    assert(pSwapchain);
+    VkPhysicalDevice physicalDevice = pSwapchain->physicalDevice;
+    VkDevice device = pSwapchain->device;
+
+    // Old swapchain.
+    VkSwapchainKHR oldSwapchain = pSwapchain->swapchain;
+
+    VkSurfaceCapabilitiesKHR surfaceCapabilities;
+    {
+        // Get surface capabilities.
+        VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+            physicalDevice, surface, &surfaceCapabilities);
+        if (VKX_IS_ERROR(result)) {
+            vkxDestroySwapchain(pSwapchain, pAllocator);
+            return result;
+        }
+    }
+
+    // Set image extent.
+    pSwapchain->imageExtent = surfaceCapabilities.currentExtent;
+
+    // Undefined?
+    if (pSwapchain->imageExtent.width == UINT32_MAX) {
+        // Clamp surface extent width.
+        if (surfaceExtent.width < surfaceCapabilities.minImageExtent.width) {
+            surfaceExtent.width = surfaceCapabilities.minImageExtent.width;
+        }
+        if (surfaceExtent.width > surfaceCapabilities.maxImageExtent.width) {
+            surfaceExtent.width = surfaceCapabilities.maxImageExtent.width;
+        }
+        // Clamp surface extent height.
+        if (surfaceExtent.height < surfaceCapabilities.minImageExtent.height) {
+            surfaceExtent.height = surfaceCapabilities.minImageExtent.height;
+        }
+        if (surfaceExtent.height > surfaceCapabilities.maxImageExtent.height) {
+            surfaceExtent.height = surfaceCapabilities.maxImageExtent.height;
+        }
+        // Set image extent.
+        pSwapchain->imageExtent = surfaceExtent;
+    }
+
+    // Minimum image count.
+    uint32_t minImageCount = surfaceCapabilities.minImageCount + 1;
+    if (surfaceCapabilities.maxImageCount > 0 &&
+        minImageCount > surfaceCapabilities.maxImageCount) {
+        minImageCount = surfaceCapabilities.maxImageCount;
+    }
+
+    // Swapchain create info.
+    VkSwapchainCreateInfoKHR swapchainCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .pNext = NULL,
+        .flags = 0,
+        .surface = surface,
+        .minImageCount = minImageCount,
+        .imageFormat = pSwapchain->surfaceFormat.format,
+        .imageColorSpace = pSwapchain->surfaceFormat.colorSpace,
+        .imageExtent = pSwapchain->imageExtent,
+        .imageArrayLayers = 1,
+        .imageUsage = pSwapchain->imageUsage,
+        .imageSharingMode = pSwapchain->imageSharingMode,
+        .queueFamilyIndexCount = pSwapchain->queueFamilyIndexCount,
+        .pQueueFamilyIndices = &pSwapchain->queueFamilyIndices[0],
+        .preTransform = pSwapchain->preTransform,
+        .compositeAlpha = pSwapchain->compositeAlpha,
+        .presentMode = pSwapchain->presentMode,
+        .clipped = VK_TRUE,
+        .oldSwapchain = oldSwapchain};
+    {
+        // Create swapchain.
+        VkResult result = vkCreateSwapchainKHR(
+            device, &swapchainCreateInfo, pAllocator, &pSwapchain->swapchain);
+        if (VKX_IS_ERROR(result)) {
+            pSwapchain->swapchain = oldSwapchain;
+            vkxDestroySwapchain(pSwapchain, pAllocator);
+            return result;
+        }
+    }
+
+    for (uint32_t imageIndex = 0; imageIndex < pSwapchain->imageCount;
+         imageIndex++) {
+        // Destroy image views.
+        vkDestroyImageView(
+            device, pSwapchain->pImageViews[imageIndex], pAllocator);
+        // Destroy acquired semaphores.
+        vkDestroySemaphore(
+            device, pSwapchain->pAcquiredSemaphores[imageIndex], pAllocator);
+        // Destroy released semaphores.
+        vkDestroySemaphore(
+            device, pSwapchain->pReleasedSemaphores[imageIndex], pAllocator);
+        // Destroy fences.
+        vkDestroyFence(device, pSwapchain->pFences[imageIndex], pAllocator);
+        // Destroy framebuffers.
+        vkDestroyFramebuffer(
+            device, pSwapchain->pFramebuffers[imageIndex], pAllocator);
+    }
+    // Destroy next acquired semaphore.
+    vkDestroySemaphore(device, pSwapchain->nextAcquiredSemaphore, pAllocator);
+    // Destroy next released semaphore.
+    vkDestroySemaphore(device, pSwapchain->nextReleasedSemaphore, pAllocator);
+    // Free command buffers.
+    if (pSwapchain->imageCount > 0)
+        vkFreeCommandBuffers(
+            device, pSwapchain->commandPool, pSwapchain->imageCount,
+            pSwapchain->pCommandBuffers);
+    // Destroy old swapchain.
+    vkDestroySwapchainKHR(device, oldSwapchain, pAllocator);
+
+    uint32_t imageCount = 0;
+    vkGetSwapchainImagesKHR(device, pSwapchain->swapchain, &imageCount, NULL);
+    if (pSwapchain->imageCount != imageCount) {
+        pSwapchain->imageCount = imageCount;
+        // Reallocate images.
+        pSwapchain->pImages =
+            realloc(pSwapchain->pImages, imageCount * sizeof(VkImage));
+        // Reallocate image views.
+        pSwapchain->pImageViews =
+            realloc(pSwapchain->pImageViews, imageCount * sizeof(VkImageView));
+        // Reallocate indices.
+        pSwapchain->pIndices =
+            realloc(pSwapchain->pIndices, imageCount * sizeof(uint32_t));
+        // Reallocate acquired semaphores.
+        pSwapchain->pAcquiredSemaphores = realloc(
+            pSwapchain->pAcquiredSemaphores, imageCount * sizeof(VkSemaphore));
+        // Reallocate released semaphores.
+        pSwapchain->pReleasedSemaphores = realloc(
+            pSwapchain->pReleasedSemaphores, imageCount * sizeof(VkSemaphore));
+        // Reallocate fences.
+        pSwapchain->pFences =
+            realloc(pSwapchain->pFences, imageCount * sizeof(VkFence));
+        // Reallocate command buffers.
+        pSwapchain->pCommandBuffers = realloc(
+            pSwapchain->pCommandBuffers, imageCount * sizeof(VkCommandBuffer));
+        // Reallocate framebuffers.
+        pSwapchain->pFramebuffers = realloc(
+            pSwapchain->pFramebuffers, imageCount * sizeof(VkFramebuffer));
+    }
+    // Nullify images.
+    memset(pSwapchain->pImages, 0, imageCount * sizeof(VkImage));
+    // Nullify image views.
+    memset(pSwapchain->pImageViews, 0, imageCount * sizeof(VkImageView));
+    // Nullify/invalidate indices.
+    memset(pSwapchain->pIndices, 0xFF, imageCount * sizeof(uint32_t));
+    // Nullify acquired semaphores.
+    memset(
+        pSwapchain->pAcquiredSemaphores, 0, imageCount * sizeof(VkSemaphore));
+    // Nullify released semaphores.
+    memset(
+        pSwapchain->pReleasedSemaphores, 0, imageCount * sizeof(VkSemaphore));
+    // Nullify temporary acquired semaphore.
+    pSwapchain->nextAcquiredSemaphore = VK_NULL_HANDLE;
+    // Nullify temporary released semaphore.
+    pSwapchain->nextReleasedSemaphore = VK_NULL_HANDLE;
+    // Nullify fences.
+    memset(pSwapchain->pFences, 0, imageCount * sizeof(VkFence));
+    // Nullify command buffers.
+    memset(
+        pSwapchain->pCommandBuffers, 0, imageCount * sizeof(VkCommandBuffer));
+    // Nullify framebuffers.
+    memset(pSwapchain->pFramebuffers, 0, imageCount * sizeof(VkFramebuffer));
+
+    {
+        // Get swapchain images.
+        VkResult result = vkGetSwapchainImagesKHR(
+            device, pSwapchain->swapchain, &pSwapchain->imageCount,
+            pSwapchain->pImages);
+        if (VKX_IS_ERROR(result)) {
+            vkxDestroySwapchain(pSwapchain, pAllocator);
+            return result;
+        }
+    }
+
+    // Image view create info.
+    VkImageViewCreateInfo imageViewCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+        .image = VK_NULL_HANDLE, // Uninitialized
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = pSwapchain->surfaceFormat.format,
+        .components =
+            {.r = VK_COMPONENT_SWIZZLE_R,
+             .g = VK_COMPONENT_SWIZZLE_G,
+             .b = VK_COMPONENT_SWIZZLE_B,
+             .a = VK_COMPONENT_SWIZZLE_A},
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1}};
+
+    for (uint32_t imageIndex = 0; imageIndex < pSwapchain->imageCount;
+         imageIndex++) {
+        // Create swapchain image view.
+        imageViewCreateInfo.image = pSwapchain->pImages[imageIndex];
+        VkResult result = vkCreateImageView(
+            device, &imageViewCreateInfo, pAllocator,
+            &pSwapchain->pImageViews[imageIndex]);
+        if (VKX_IS_ERROR(result)) {
+            vkxDestroySwapchain(pSwapchain, pAllocator);
+            return result;
+        }
+    }
+
+    // Create semaphores.
+    uint32_t semaphoreCounts[4] = {imageCount, imageCount, 1, 1};
+    VkSemaphore* pSemaphores[4] = {
+        pSwapchain->pAcquiredSemaphores, pSwapchain->pReleasedSemaphores,
+        &pSwapchain->nextAcquiredSemaphore,
+        &pSwapchain->nextReleasedSemaphore};
+    for (uint32_t paramIndex = 0; paramIndex < 4; paramIndex++) {
+        VkResult result = vkxCreateSemaphores(
+            device, semaphoreCounts[paramIndex], pAllocator,
+            pSemaphores[paramIndex]);
+        if (VKX_IS_ERROR(result)) {
+            vkxDestroySwapchain(pSwapchain, pAllocator);
+            return result;
+        }
+    }
+
+    // Create fences.
+    {
+        VkResult result = vkxCreateFences(
+            device, imageCount, VK_TRUE, pAllocator, pSwapchain->pFences);
+        if (VKX_IS_ERROR(result)) {
+            vkxDestroySwapchain(pSwapchain, pAllocator);
+            return result;
+        }
+    }
+
+    // Allocate command buffers.
+    VkCommandBufferAllocateInfo commandBufferAllocateInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext = NULL,
+        .commandPool = pSwapchain->commandPool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = pSwapchain->imageCount};
+    VkResult result = vkAllocateCommandBuffers(
+        pSwapchain->device, &commandBufferAllocateInfo,
+        pSwapchain->pCommandBuffers);
+    if (VKX_IS_ERROR(result)) {
+        vkxDestroySwapchain(pSwapchain, pAllocator);
+        return result;
+    }
+
+    // Is render pass setup?
+    if (pSwapchain->renderPass != VK_NULL_HANDLE) {
+        // Create framebuffers.
+        for (uint32_t imageIndex = 0; imageIndex < imageCount; imageIndex++) {
+            VkFramebufferCreateInfo framebufferCreateInfo = {
+                .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                .pNext = NULL,
+                .flags = 0,
+                .renderPass = pSwapchain->renderPass,
+                .attachmentCount = 1, // TODO
+                .pAttachments = &pSwapchain->pImageViews[imageIndex],
+                .width = pSwapchain->imageExtent.width,
+                .height = pSwapchain->imageExtent.height,
+                .layers = 1};
+            VkResult result = vkCreateFramebuffer(
+                device, &framebufferCreateInfo, NULL,
+                &pSwapchain->pFramebuffers[imageIndex]);
+            if (result != VK_SUCCESS) {
+                vkxDestroySwapchain(pSwapchain, pAllocator);
+                return result;
+            }
+        }
+    }
+
+    // Nullify active state.
+    pSwapchain->activeIndex = UINT32_MAX;
+    pSwapchain->activeAcquiredSemaphore = VK_NULL_HANDLE;
+    pSwapchain->activeReleasedSemaphore = VK_NULL_HANDLE;
+    pSwapchain->activeFence = VK_NULL_HANDLE;
+    pSwapchain->activeCommandBuffer = VK_NULL_HANDLE;
+    pSwapchain->activeFramebuffer = VK_NULL_HANDLE;
+
+    return VK_SUCCESS;
+}
+
+void vkxDestroySwapchain(
+    VkxSwapchain* pSwapchain, const VkAllocationCallbacks* pAllocator) {
+    if (pSwapchain) {
+        VkDevice device = pSwapchain->device;
+        for (uint32_t imageIndex = 0; imageIndex < pSwapchain->imageCount;
+             imageIndex++)
+            // Destroy framebuffers.
+            vkDestroyFramebuffer(
+                device, pSwapchain->pFramebuffers[imageIndex], pAllocator);
+        // Destroy image views.
+        vkxDestroyImageViews(
+            pSwapchain->device, pSwapchain->imageCount,
+            pSwapchain->pImageViews, pAllocator);
+        // Destroy fences.
+        vkxDestroyFences(
+            pSwapchain->device, pSwapchain->imageCount, pSwapchain->pFences,
+            pAllocator);
+        // Destroy acquired semaphores.
+        vkxDestroySemaphores(
+            pSwapchain->device, pSwapchain->imageCount,
+            pSwapchain->pAcquiredSemaphores, pAllocator);
+        // Destroy released semaphores.
+        vkxDestroySemaphores(
+            pSwapchain->device, pSwapchain->imageCount,
+            pSwapchain->pReleasedSemaphores, pAllocator);
+        // Destroy next acquired semaphore.
+        vkDestroySemaphore(
+            pSwapchain->device, pSwapchain->nextAcquiredSemaphore, pAllocator);
+        // Destroy next released semaphore.
+        vkDestroySemaphore(
+            pSwapchain->device, pSwapchain->nextReleasedSemaphore, pAllocator);
+        // Free command buffers.
+        vkFreeCommandBuffers(
+            pSwapchain->device, pSwapchain->commandPool,
+            pSwapchain->imageCount, pSwapchain->pCommandBuffers);
+        // Destroy command pool.
+        vkDestroyCommandPool(
+            pSwapchain->device, pSwapchain->commandPool, pAllocator);
+        // Destroy render pass.
+        vkDestroyRenderPass(
+            pSwapchain->device, pSwapchain->renderPass, pAllocator);
+        // Destroy swapchain.
+        vkDestroySwapchainKHR(
+            pSwapchain->device, pSwapchain->swapchain, pAllocator);
+        // Free framebuffers.
+        free(pSwapchain->pFramebuffers);
+        // Free command buffers.
+        free(pSwapchain->pCommandBuffers);
+        // Free fences.
+        free(pSwapchain->pFences);
+        // Free released semaphores.
+        free(pSwapchain->pReleasedSemaphores);
+        // Free acquired semaphores.
+        free(pSwapchain->pAcquiredSemaphores);
+        // Free indices.
+        free(pSwapchain->pIndices);
+        // Free image views.
+        free(pSwapchain->pImageViews);
+        // Free images.
+        free(pSwapchain->pImages);
+        // Nullify.
+        memset(pSwapchain, 0, sizeof(VkxSwapchain));
+    }
+}
+
+#if 0
+void createSwapchainAttachments(
+            VkxSwapchain* pSwapchain,
+            uint32_t colorAttachmentCount,
+            const VkxSwapchainColorAttachmentDescription* pColorAttachments,
+            const VkAllocationCallbacks* pAllocator,
+            VkxSwapchainAttachments* pAttachments)
+{
+    assert(pAttachments);
+    memset(pAttachments, 0, sizeof(VkxSwapchainAttachments));
+    VkImageCreateInfo* pImageCreateInfos = 
+            malloc(sizeof(VkImageCreateInfo) * colorAttachmentCount);
+    VkMemoryPropertyFlags* pMemoryPropertyFlags = 
+            malloc(sizeof(VkMemoryPropertyFlags) * colorAttachmentCount);
+    for (uint32_t attIndex = 0; attIndex < colorAttachmentCount;
+                  attIndex++) {
+        const VkxSwapchainColorAttachmentDescription* 
+                pColorAttachment = 
+                pColorAttachments + attIndex;
+        VkImageCreateInfo imageCreateInfo = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = NULL,
+            .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = pColorAttachment->format,
+            .extent = {
+                .width = pSwapchain->imageExtent.width,
+                .height = pSwapchain->imageExtent.height,
+                .depth = 1
+            },
+            .mipLevels = pColorAttachment->mipLevels,
+            .arrayLayers = pColorAttachment->arrayLayers,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = pColorAttachment->usage,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = NULL,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+        };
+        if (pColorAttachment->pExtentOverride) {
+            VkExtent2D extent = 
+                pColorAttachment->pExtentOverride(pSwapchain->imageExtent, 
+                pColorAttachment->pExtentOverrideUserData);
+            imageCreateInfo.extent.width = extent.width;
+            imageCreateInfo.extent.height = extent.height;
+        }
+        pImageCreateInfos[attIndex] = imageCreateInfo;
+        pMemoryPropertyFlags[attIndex] = 
+                VK_MEMORY_PROPERTY_FLAGS_DEVICE_LOCAL_BIT;
+    }
+    VkResult result = vkxCreateImageGroup(
+            pSwapchain->physicalDevice,
+            pSwapchain->device,
+            colorAttachmentCount,
+            pImageCreateInfos,
+            pMemoryPropertyFlags,
+            pAllocator,
+            &pAttachments->images);
+    vkxCreateDefaultImageViews(
+            pSwapchain->device,
+            colorAttachmentCount,
+            pAttachments->images.pImages,
+            pImageCreateInfos, pAllocator,
+            pAttachments->pImageViews);
+}
+#endif
+
+VkResult vkxSwapchainSetupRenderPass(
+    VkxSwapchain* pSwapchain,
+    const VkRenderPassCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator) {
+    VkResult result = vkCreateRenderPass(
+        pSwapchain->device, pCreateInfo, pAllocator, &pSwapchain->renderPass);
+    if (result != VK_SUCCESS) return result;
+
+    // Create framebuffers.
+    for (uint32_t imageIndex = 0; imageIndex < pSwapchain->imageCount;
+         imageIndex++) {
+        VkFramebufferCreateInfo framebufferCreateInfo = {
+            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .pNext = NULL,
+            .flags = 0,
+            .renderPass = pSwapchain->renderPass,
+            .attachmentCount = 1, // TODO
+            .pAttachments = &pSwapchain->pImageViews[imageIndex],
+            .width = pSwapchain->imageExtent.width,
+            .height = pSwapchain->imageExtent.height,
+            .layers = 1};
+        VkResult result = vkCreateFramebuffer(
+            pSwapchain->device, &framebufferCreateInfo, NULL,
+            &pSwapchain->pFramebuffers[imageIndex]);
+        if (result != VK_SUCCESS) {
+            for (uint32_t imageIndex2 = 0; imageIndex2 < imageIndex;
+                 imageIndex2++) {
+                // Destroy framebuffers.
+                vkDestroyFramebuffer(
+                    pSwapchain->device, pSwapchain->pFramebuffers[imageIndex2],
+                    pAllocator);
+                // Nullify.
+                pSwapchain->pFramebuffers[imageIndex2] = VK_NULL_HANDLE;
+            }
+            // Destroy render pass.
+            vkDestroyRenderPass(
+                pSwapchain->device, pSwapchain->renderPass, pAllocator);
+            // Nullify.
+            pSwapchain->renderPass = VK_NULL_HANDLE;
+            // Failure.
+            return result;
+        }
+    }
+
+    return VK_SUCCESS;
+}
+
+static void swapSemaphores(VkSemaphore* pSem1, VkSemaphore* pSem2) {
+    VkSemaphore tmp = *pSem1;
+    *pSem1 = *pSem2;
+    *pSem2 = tmp;
+}
+
+VkResult vkxSwapchainAcquireNextImage(
+    VkxSwapchain* pSwapchain, uint64_t timeout) {
+    // Acquire next image.
+    uint32_t nextImageIndex = 0;
+    VkResult result = vkAcquireNextImageKHR(
+        pSwapchain->device, pSwapchain->swapchain, timeout,
+        pSwapchain->nextAcquiredSemaphore, VK_NULL_HANDLE, &nextImageIndex);
+    if (result == VK_SUCCESS) {
+        // Swap semaphores.
+        swapSemaphores(
+            &pSwapchain->nextAcquiredSemaphore,
+            &pSwapchain->pAcquiredSemaphores[nextImageIndex]);
+        swapSemaphores(
+            &pSwapchain->nextReleasedSemaphore,
+            &pSwapchain->pReleasedSemaphores[nextImageIndex]);
+
+        // Shuffle indices.
+        for (uint32_t imageIndex = 1; imageIndex < pSwapchain->imageCount;
+             imageIndex++) {
+            pSwapchain->pIndices[imageIndex] =
+                pSwapchain->pIndices[imageIndex - 1];
+        }
+        pSwapchain->pIndices[0] = nextImageIndex;
+
+        // Wait until image is actually available for rendering.
+        vkWaitForFences(
+            pSwapchain->device, 1, &pSwapchain->pFences[nextImageIndex],
+            VK_TRUE, UINT64_MAX);
+        vkResetFences(
+            pSwapchain->device, 1, &pSwapchain->pFences[nextImageIndex]);
+
+        // Update active state.
+        pSwapchain->activeIndex = nextImageIndex;
+        pSwapchain->activeAcquiredSemaphore =
+            pSwapchain->pAcquiredSemaphores[nextImageIndex];
+        pSwapchain->activeReleasedSemaphore =
+            pSwapchain->pReleasedSemaphores[nextImageIndex];
+        pSwapchain->activeFence = pSwapchain->pFences[nextImageIndex];
+        pSwapchain->activeCommandBuffer =
+            pSwapchain->pCommandBuffers[nextImageIndex];
+        pSwapchain->activeFramebuffer =
+            pSwapchain->pFramebuffers[nextImageIndex];
+    }
+
+    return result;
+}
+
+VkResult vkxSwapchainSubmit(VkxSwapchain* pSwapchain) {
+    VkPipelineStageFlags waitDstStageMask =
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo submitInfo = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &pSwapchain->activeAcquiredSemaphore,
+        .pWaitDstStageMask = &waitDstStageMask,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &pSwapchain->activeCommandBuffer,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &pSwapchain->activeReleasedSemaphore};
+    VkResult result = vkQueueSubmit(
+        pSwapchain->graphicsQueue, 1, &submitInfo, pSwapchain->activeFence);
+    return result;
+}
+
+VkResult vkxSwapchainPresent(
+    VkxSwapchain* pSwapchain,
+    uint32_t moreWaitSemaphoreCount,
+    const VkSemaphore* pMoreWaitSemaphores) {
+    // Initialize wait semaphores.
+    VkSemaphore* pWaitSemaphores =
+        VKX_LOCAL_MALLOC(sizeof(VkSemaphore) * (moreWaitSemaphoreCount + 1));
+    pWaitSemaphores[0] = pSwapchain->activeReleasedSemaphore;
+    memcpy(
+        &pWaitSemaphores[1], pMoreWaitSemaphores,
+        sizeof(VkSemaphore) * moreWaitSemaphoreCount);
+
+    // Present info.
+    VkPresentInfoKHR presentInfo = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .pNext = NULL,
+        .waitSemaphoreCount = moreWaitSemaphoreCount + 1,
+        .pWaitSemaphores = pWaitSemaphores,
+        .swapchainCount = 1,
+        .pSwapchains = &pSwapchain->swapchain,
+        .pImageIndices = &pSwapchain->pIndices[0],
+        .pResults = NULL};
+
+    // Present.
+    VkResult result =
+        vkQueuePresentKHR(pSwapchain->presentQueue, &presentInfo);
+
+    // Free wait semaphores.
+    VKX_LOCAL_FREE(pWaitSemaphores);
+
+    return result;
+}
