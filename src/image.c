@@ -175,6 +175,17 @@ VkResult vkxCreateImageGroup(
     // Free memory requirements.
     VKX_LOCAL_FREE(pMemoryRequirements);
 
+    // Create default image views.
+    pImageGroup->pDefaultImageViews =
+        (VkImageView*)malloc(sizeof(VkImageView) * imageCount);
+    VkResult result = vkxCreateDefaultImageViews(
+        device, imageCount, pImageGroup->pImages, pImageCreateInfos,
+        pAllocator, pImageGroup->pDefaultImageViews);
+    if (VKX_IS_ERROR(result)) {
+        vkxDestroyImageGroup(device, pImageGroup, pAllocator);
+        return result;
+    }
+
     return VK_SUCCESS;
 }
 
@@ -183,16 +194,25 @@ void vkxDestroyImageGroup(
     VkxImageGroup* pImageGroup,
     const VkAllocationCallbacks* pAllocator) {
     if (pImageGroup) {
+        // Destroy image views.
+        vkxDestroyImageViews(
+            device, pImageGroup->imageCount, pImageGroup->pDefaultImageViews,
+            pAllocator);
+
         for (uint32_t imageIndex = 0; imageIndex < pImageGroup->imageCount;
-             imageIndex++) {
+             imageIndex++)
             // Destroy image.
             vkDestroyImage(
                 device, pImageGroup->pImages[imageIndex], pAllocator);
-        }
+
+        // Free image views.
+        free(pImageGroup->pDefaultImageViews);
+
         // Free images.
         free(pImageGroup->pImages);
 
         // Nullify.
+        pImageGroup->pDefaultImageViews = NULL;
         pImageGroup->pImages = NULL;
         pImageGroup->imageCount = 0;
 

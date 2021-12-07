@@ -128,6 +128,9 @@ typedef struct VkxImageGroup_ {
     /** \brief The images. */
     VkImage* pImages;
 
+    /** \brief The default image views. */
+    VkImageView* pDefaultImageViews;
+
     /** \brief The shared memory. */
     VkxSharedDeviceMemory sharedMemory;
 } VkxImageGroup;
