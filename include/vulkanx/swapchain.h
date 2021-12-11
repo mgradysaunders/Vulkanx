@@ -174,9 +174,6 @@ typedef struct VkxSwapchain_ {
      */
     /**\{*/
 
-    /** \brief The render pass. */
-    VkRenderPass renderPass;
-
     /** \brief The framebuffers for each image. */
     VkFramebuffer* pFramebuffers;
 
@@ -306,14 +303,6 @@ VkResult vkxRecreateSwapchain(
  */
 void vkxDestroySwapchain(
     VkxSwapchain* pSwapchain, const VkAllocationCallbacks* pAllocator);
-
-/**
- * \brief Setup render pass.
- */
-VkResult vkxSwapchainSetupRenderPass(
-    VkxSwapchain* pSwapchain,
-    const VkRenderPassCreateInfo* pCreateInfo,
-    const VkAllocationCallbacks* pAllocator);
 
 /**
  * \brief Acquire next image.

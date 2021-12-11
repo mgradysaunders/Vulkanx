@@ -505,30 +505,6 @@ VkResult vkxRecreateSwapchain(
         return result;
     }
 
-    // Is render pass setup?
-    if (pSwapchain->renderPass != VK_NULL_HANDLE) {
-        // Create framebuffers.
-        for (uint32_t imageIndex = 0; imageIndex < imageCount; imageIndex++) {
-            VkFramebufferCreateInfo framebufferCreateInfo = {
-                .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-                .pNext = NULL,
-                .flags = 0,
-                .renderPass = pSwapchain->renderPass,
-                .attachmentCount = 1, // TODO
-                .pAttachments = &pSwapchain->pImageViews[imageIndex],
-                .width = pSwapchain->imageExtent.width,
-                .height = pSwapchain->imageExtent.height,
-                .layers = 1};
-            VkResult result = vkCreateFramebuffer(
-                device, &framebufferCreateInfo, NULL,
-                &pSwapchain->pFramebuffers[imageIndex]);
-            if (result != VK_SUCCESS) {
-                vkxDestroySwapchain(pSwapchain, pAllocator);
-                return result;
-            }
-        }
-    }
-
     // Nullify active state.
     pSwapchain->activeIndex = UINT32_MAX;
     pSwapchain->activeAcquiredSemaphore = VK_NULL_HANDLE;
@@ -578,9 +554,6 @@ void vkxDestroySwapchain(
         // Destroy command pool.
         vkDestroyCommandPool(
             pSwapchain->device, pSwapchain->commandPool, pAllocator);
-        // Destroy render pass.
-        vkDestroyRenderPass(
-            pSwapchain->device, pSwapchain->renderPass, pAllocator);
         // Destroy swapchain.
         vkDestroySwapchainKHR(
             pSwapchain->device, pSwapchain->swapchain, pAllocator);
@@ -603,53 +576,6 @@ void vkxDestroySwapchain(
         // Nullify.
         memset(pSwapchain, 0, sizeof(VkxSwapchain));
     }
-}
-
-VkResult vkxSwapchainSetupRenderPass(
-    VkxSwapchain* pSwapchain,
-    const VkRenderPassCreateInfo* pCreateInfo,
-    const VkAllocationCallbacks* pAllocator) {
-    VkResult result = vkCreateRenderPass(
-        pSwapchain->device, pCreateInfo, pAllocator, &pSwapchain->renderPass);
-    if (result != VK_SUCCESS) return result;
-
-    // Create framebuffers.
-    for (uint32_t imageIndex = 0; imageIndex < pSwapchain->imageCount;
-         imageIndex++) {
-        VkFramebufferCreateInfo framebufferCreateInfo = {
-            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .pNext = NULL,
-            .flags = 0,
-            .renderPass = pSwapchain->renderPass,
-            .attachmentCount = 1, // TODO
-            .pAttachments = &pSwapchain->pImageViews[imageIndex],
-            .width = pSwapchain->imageExtent.width,
-            .height = pSwapchain->imageExtent.height,
-            .layers = 1};
-        VkResult result = vkCreateFramebuffer(
-            pSwapchain->device, &framebufferCreateInfo, NULL,
-            &pSwapchain->pFramebuffers[imageIndex]);
-        if (result != VK_SUCCESS) {
-            for (uint32_t imageIndex2 = 0; imageIndex2 < imageIndex;
-                 imageIndex2++) {
-                // Destroy framebuffers.
-                vkDestroyFramebuffer(
-                    pSwapchain->device, pSwapchain->pFramebuffers[imageIndex2],
-                    pAllocator);
-                // Nullify.
-                pSwapchain->pFramebuffers[imageIndex2] = VK_NULL_HANDLE;
-            }
-            // Destroy render pass.
-            vkDestroyRenderPass(
-                pSwapchain->device, pSwapchain->renderPass, pAllocator);
-            // Nullify.
-            pSwapchain->renderPass = VK_NULL_HANDLE;
-            // Failure.
-            return result;
-        }
-    }
-
-    return VK_SUCCESS;
 }
 
 static void swapSemaphores(VkSemaphore* pSem1, VkSemaphore* pSem2) {
